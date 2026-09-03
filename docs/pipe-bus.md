@@ -53,8 +53,9 @@ then `wasigo::run()`.
 `ExtraLayer::Handle` is ordinary C++. `ServeLayer` does the Pipe IO and
 copies `req.id` onto the reply.
 
-Default stubs (`DefaultStubs`): four layers, each on its own Pipe, each
-calling `W2gSapiHandle` through `PassthroughChannel`.
+Default stubs (`DefaultStubs`): eight layers (one per topic in
+architecture.md's table), each on its own Pipe, each calling
+`W2gSapiHandle` through `PassthroughChannel`.
 
 ```cpp
 w2g::Bus bus;
@@ -78,8 +79,25 @@ wasigo::run();
 ## SAPI-shaped C ABI
 
 `W2gSapiHandle` in `include/w2g/sapi.h` is the extra-G++ library surface
-`add_sapi_library()` would wrap. Known stub topics fill `reply_topic` +
-payload and return `W2G_RESULT_UNIMPLEMENTED`. Unknown → `NOT_FOUND`.
+`add_sapi_library()` would wrap, and the one place every topic is
+dispatched (`src/sapi/handle.cc`). Unknown topics → `NOT_FOUND`.
+
+With `W2G_ABAC_SYSTEM=1` (the library's own CMake default), each known
+topic calls into `src/sapi/real_win.cc`/`tls_win.cc` and does the real
+OS work -- `net.dial` really `connect()`s (and leaves the socket open,
+registered in `src/sapi/handles.h`'s table as a handle), `os.exec`
+really `CreateProcess`es, `tls.dial` does a real Schannel/SSPI handshake
+with certificate + hostname validation always on, etc. (see
+architecture.md's topics table, including the handle-based follow-ups --
+`net.accept`, `net.io.*`, `os.exec.start`/`wait`/`stdout.read`,
+`tls.io.*` -- that give real read/write/accept/wait on those handles).
+`W2G_RESULT_OK` means the real operation ran to completion (its payload
+may still describe a real failure, e.g. `error: connect ...`).
+
+Without `W2G_ABAC_SYSTEM` (`-DW2G_ABAC_SYSTEM=0`), every known topic
+fills `reply_topic` + payload with the old WASIGo++ not-supported string
+and returns `W2G_RESULT_UNIMPLEMENTED`, same as before real_win.cc
+existed.
 
 Host code must not depend on google/sandboxed-api. Default
 `PassthroughChannel` calls the C function in-process on every OS.

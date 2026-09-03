@@ -4,6 +4,7 @@
 #include "w2g/stub.h"
 
 #include <string>
+#include <vector>
 
 namespace w2g {
 
@@ -20,6 +21,12 @@ class WasiNet {
   wasigo::TaskT<RecvResult> Listen(std::string network, std::string address);
   wasigo::TaskT<RecvResult> TcpBind(std::string address);
   wasigo::TaskT<RecvResult> UdpBind(std::string address);
+
+  // Extra G++ system stubs (os.exec / os.user / syscall / tls.dial).
+  wasigo::TaskT<RecvResult> Exec(std::vector<std::string> argv);
+  wasigo::TaskT<RecvResult> CurrentUser();
+  wasigo::TaskT<RecvResult> Syscall(std::string op, std::string arg = "");
+  wasigo::TaskT<RecvResult> TlsDial(std::string address);
 
   const std::string& layer() const { return layer_; }
 

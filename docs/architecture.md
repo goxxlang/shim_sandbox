@@ -54,18 +54,44 @@ shim (`os_open`, `os_create`, …) is **wrapped** by `w2g::Shim`, not forked.
 | `w2g::s2` | sandbox (not Google’s `sandbox2::`) |
 | `wasigo` | WASIGo++ runtime (channels, slices, `os_*`) |
 
-## Topics (stubbed net)
+## Topics (extra G++ layers)
 
-| Request | Reply | Extra layer |
+The original 8 topics each have a `gxx.*` `ExtraLayer` too (reachable
+through the WASI-side `WasiNet`/`Bus` pub-sub path `examples/bridge`
+demonstrates, in addition to `gocvm.Call`). The newer handle-based
+follow-up topics below are `gocvm.Call`-only (`src/sapi/handle.cc`'s
+dispatch) -- session state (an open socket/process/TLS session) doesn't
+need a second pub-sub demo path to be useful.
+
+| Request | Reply | Extra layer | Real backend (`W2G_ABAC_SYSTEM=1`) |
+|---|---|---|---|
+| `net.dial` | `net.dial.reply` | `gxx.dial` | real `connect()` (Winsock); **leaves the socket open**, handed back as a handle |
+| `net.listen` | `net.listen.reply` | `gxx.listen` | real `bind()` (+`listen()` for TCP only), left open as a handle |
+| `net.tcp.bind` | `net.tcp.bind.reply` | `gxx.tcp` | real `bind()` (TCP), pure probe -- closed immediately |
+| `net.udp.bind` | `net.udp.bind.reply` | `gxx.udp` | real `bind()` (UDP), pure probe -- closed immediately |
+| `os.exec` | `os.exec.reply` | `gxx.exec` | real `CreateProcess`, captures combined stdout+stderr, waits for exit (one-shot) |
+| `os.user` | `os.user.reply` | `gxx.user` | real `GetUserNameW`/`LookupAccountNameW`/`LookupAccountSidW`+`NetUserGetInfo` (current user, or `lookup <name>` / `lookupid <sid>`) |
+| `syscall` | `syscall.reply` | `gxx.syscall` | real getpid/getppid/getenv/environ/chdir/kill |
+| `tls.dial` | `tls.dial.reply` | `gxx.tls` | real TCP connect **and** a real Schannel/SSPI handshake (certificate + hostname validation always on), left open as a handle |
+
+Handle-based follow-ups (`src/sapi/handles.h`'s table; no `gxx.*` layer):
+
+| Request | Reply | Real backend |
 |---|---|---|
-| `net.dial` | `net.dial.reply` | `gxx.dial` |
-| `net.listen` | `net.listen.reply` | `gxx.listen` |
-| `net.tcp.bind` | `net.tcp.bind.reply` | `gxx.tcp` |
-| `net.udp.bind` | `net.udp.bind.reply` | `gxx.udp` |
-| `os.exec` | `os.exec.reply` | `gxx.exec` |
-| `os.user` | `os.user.reply` | `gxx.user` |
-| `syscall` | `syscall.reply` | `gxx.syscall` |
-| `tls.dial` | `tls.dial.reply` | `gxx.tls` |
+| `net.accept` | `net.accept.reply` | real `accept()` on a `net.listen` handle |
+| `net.io.read` / `write` / `close` | `....reply` | real `recv()`/`send()`/`closesocket()` on a `net.dial`/`accept` handle |
+| `net.io.readfrom` / `writeto` | `....reply` | real `recvfrom()`/`sendto()`, UDP handles |
+| `os.exec.start` | `os.exec.start.reply` | real `CreateProcess`, does **not** wait -- returns a process handle |
+| `os.exec.wait` | `os.exec.wait.reply` | real `WaitForSingleObject` + exit code on an `os.exec.start` handle |
+| `os.exec.stdout.read` | `....reply` | real `ReadFile` on the process's combined output pipe |
+| `tls.io.read` / `write` / `close` | `....reply` | real `DecryptMessage`/`EncryptMessage` around a `tls.dial` handle's socket |
 
-Payload of a successful stub reply is the WASIGo++ not-supported string.
-The communication is real; the sockets are not.
+The communication (Pipe/Bus/ExtraLayer/SAPI) was always real; what used to
+be fake was every reply's payload -- a canned "not supported" string,
+regardless of `W2G_ABAC_SYSTEM`. `src/sapi/real_win.cc`/`tls_win.cc` (see
+[pipe-bus.md](pipe-bus.md)) now does the real work when the compile-time
+System gate is on (the library's own CMake default). Building without it
+(`-DW2G_ABAC_SYSTEM=0`) restores the old always-"not supported" behavior --
+these are still real syscalls with real, possibly sensitive, effects
+(spawning processes, opening sockets, reading env/user info), gated the
+same way `w2g::Shim`'s file access already was.

@@ -5,11 +5,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Sibling wasigoc (GitHub: goxxlang/wasigoc). Local checkouts may still
-# use the historical WASIGo++ directory name.
+# Sibling wasigoc (GitHub: goxxlang/wasigoc). "go++" is this workspace's
+# active fork of it (see go++/FORK.md -- never edit WASIGo++ directly from
+# that tree), checked before the frozen historical "WASIGo++" checkout so
+# a real fork-only feature (e.g. wasigo::gocvm) is actually visible here
+# instead of silently falling back to the stale upstream runtime.hpp.
 set(W2G_WASIGO_DIR "")
 foreach(_cand IN ITEMS
     "${CMAKE_CURRENT_SOURCE_DIR}/../wasigoc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../go++"
     "${CMAKE_CURRENT_SOURCE_DIR}/../WASIGo++")
   if(EXISTS "${_cand}/src/runtime.hpp")
     set(W2G_WASIGO_DIR "${_cand}")
@@ -20,10 +24,16 @@ if(W2G_WASIGO_DIR STREQUAL "")
   message(FATAL_ERROR "shim_sandbox needs wasigoc (goxxlang/wasigoc) as a sibling with src/runtime.hpp")
 endif()
 
-if(WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
+  set(W2G_S2_OS src/s2/os_wasi.cc)
+  set(W2G_SAPI_REAL src/sapi/real_posix.cc)
+elseif(WIN32)
   set(W2G_S2_OS src/s2/os_win.cc)
+  set(W2G_SAPI_REAL src/sapi/real_win.cc src/sapi/tls_win.cc src/sapi/net_internal.cc
+                    src/sapi/handles.cc)
 else()
   set(W2G_S2_OS src/s2/os_posix.cc)
+  set(W2G_SAPI_REAL src/sapi/real_posix.cc)
 endif()
 
 add_library(w2g
@@ -34,6 +44,8 @@ add_library(w2g
   src/wasi.cc
   src/sapi/handle.cc
   src/sapi/channel.cc
+  ${W2G_SAPI_REAL}
+  src/gocvm_bridge.cc
   src/c/system.cc
   src/s2/result.cc
   src/s2/policy.cc
@@ -73,6 +85,10 @@ endif()
 
 find_package(Threads REQUIRED)
 target_link_libraries(w2g PUBLIC Threads::Threads)
+
+if(WIN32)
+  target_link_libraries(w2g PUBLIC ws2_32 iphlpapi secur32 crypt32 netapi32)
+endif()
 
 enable_testing()
 

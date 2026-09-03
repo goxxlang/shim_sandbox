@@ -26,12 +26,32 @@ Bus (pub/sub over Pipe)
        w2g::Shim + ABAC             wasigoc os.* host surface
 ```
 
-`Dial` / `Listen` / TCP bind / UDP bind stay stubbed. They speak this bus
-instead of pretending preview 1 has sockets. `os.exec` / `os.user` /
-`syscall` / `tls.dial` extra G++ stubs sit on the same bus. Reaching the
-host OS (`Shim` files/env, s2 spawn) requires `-DW2G_ABAC_SYSTEM=1` at
-compile time plus a runtime ABAC allow; without the define the shim
-compiles to deny and never calls `fopen`.
+`Dial` / `Listen` / TCP bind / UDP bind speak this bus instead of
+pretending preview 1 has sockets. `os.exec` / `os.user` / `syscall` /
+`tls.dial` extra G++ stubs sit on the same bus. With `-DW2G_ABAC_SYSTEM=1`
+at compile time (the library's own CMake default) every one of those is
+backed by a real host-OS call (`src/sapi/real_win.cc`: real Winsock
+connect/bind/accept, real `CreateProcess`, real user/env lookups,
+`src/sapi/tls_win.cc`: a real Schannel/SSPI handshake with certificate
+validation always on) -- see [docs/architecture.md](docs/architecture.md)'s
+topics table. `net.dial`/`net.listen` leave the socket **open** (a real,
+usable handle -- `src/sapi/handles.h` -- not just a reachability probe),
+and a further ~12 handle-based topics (`net.accept`, `net.io.*`,
+`os.exec.start`/`wait`/`stdout.read`, `tls.io.*`) give real read/write/
+accept/wait on it. Reaching the rest of the host OS (`Shim` files/env,
+s2 spawn) additionally needs a runtime ABAC allow; without the
+compile-time define the shim compiles to deny and never calls `fopen`,
+and every topic above goes back to answering a canned "not supported".
+
+`src/gocvm_bridge.cc` wires those same real backends straight into real
+Go++ *source* (not just hand-written C++ callers like `examples/bridge`):
+wasigoc's `wasigo::gocvm::Call(topic, payload)` (its own `src/runtime.hpp`
+-- the one compiler-known dispatch gate, not per-package FFI) reaches
+here when a program is built with `goclang++.bat --shim-sandbox`
+(`-DWASIGO_GOCVM_BRIDGE=1`), so `net`/`crypto/tls`/`os/exec`/`os/user`/
+`syscall` stdlib source (real `net.Dial`+`Conn.Read`/`Write`, real
+`tls.Dial` HTTPS, `exec.Cmd.Start`/`Wait` with streamed output, ...)
+gets this repo's real backends, not a stub.
 
 google/sandboxed-api (sandbox2) is Linux-only (namespaces, seccomp, ptrace).
 That is a killer here (Windows + wasip1). shim_sandbox keeps the **shape**
@@ -66,9 +86,13 @@ cmake -B build-wasi -DCMAKE_TOOLCHAIN_FILE=cmake/wasi-sdk.cmake
 cmake --build build-wasi
 ```
 
-C++20. Windows (MSVC or MinGW) and POSIX. Tests live in `tests/` (pipe, bus,
-stubs, SAPI C ABI, s2 spawn/safety, ABAC). Example: `examples/bridge` (WASI
-`Dial` → `gxx.dial` stub over `Pipe()`).
+C++20. Windows real backends now; POSIX real backends are not implemented
+yet (`src/sapi/real_posix.cc` is an honest stub -- see architecture.md).
+Tests live in `tests/` (pipe, bus, stubs, SAPI C ABI, s2 spawn/safety,
+ABAC). Example: `examples/bridge` -- a WASI-side `WasiNet` client driving
+all eight topics over `Pipe()`/`Bus` to the real extra-G++ side in one
+native process, the same "wasigoc client, goclang++ server, one
+shim_sandbox process" shape `goclang++.bat --shim-sandbox` builds.
 
 ## Layout
 

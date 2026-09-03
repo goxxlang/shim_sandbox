@@ -17,7 +17,15 @@ wasigo::Error WasiNet::Attach() {
   if (!err.is_nil()) return err;
   err = bus_->Subscribe(layer_, kTopicTcpBindReply);
   if (!err.is_nil()) return err;
-  return bus_->Subscribe(layer_, kTopicUdpBindReply);
+  err = bus_->Subscribe(layer_, kTopicUdpBindReply);
+  if (!err.is_nil()) return err;
+  err = bus_->Subscribe(layer_, kTopicExecReply);
+  if (!err.is_nil()) return err;
+  err = bus_->Subscribe(layer_, kTopicUserReply);
+  if (!err.is_nil()) return err;
+  err = bus_->Subscribe(layer_, kTopicSyscallReply);
+  if (!err.is_nil()) return err;
+  return bus_->Subscribe(layer_, kTopicTlsDialReply);
 }
 
 wasigo::TaskT<RecvResult> WasiNet::call(const char* topic, const char* reply,
@@ -39,6 +47,27 @@ wasigo::TaskT<RecvResult> WasiNet::TcpBind(std::string address) {
 
 wasigo::TaskT<RecvResult> WasiNet::UdpBind(std::string address) {
   co_return co_await call(kTopicUdpBind, kTopicUdpBindReply, address);
+}
+
+wasigo::TaskT<RecvResult> WasiNet::Exec(std::vector<std::string> argv) {
+  std::string payload;
+  for (size_t i = 0; i < argv.size(); ++i) {
+    if (i) payload.push_back('\x1f');
+    payload += argv[i];
+  }
+  co_return co_await call(kTopicExec, kTopicExecReply, payload);
+}
+
+wasigo::TaskT<RecvResult> WasiNet::CurrentUser() {
+  co_return co_await call(kTopicUser, kTopicUserReply, "");
+}
+
+wasigo::TaskT<RecvResult> WasiNet::Syscall(std::string op, std::string arg) {
+  co_return co_await call(kTopicSyscall, kTopicSyscallReply, arg.empty() ? op : op + " " + arg);
+}
+
+wasigo::TaskT<RecvResult> WasiNet::TlsDial(std::string address) {
+  co_return co_await call(kTopicTlsDial, kTopicTlsDialReply, address);
 }
 
 }  // namespace w2g
