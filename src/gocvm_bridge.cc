@@ -104,6 +104,11 @@ class AsyncSapiBridge : public wasigo::gocvm::AsyncHostBridge {
       // which is the entire point.
       Completion c;
       c.id = job.id;
+      // Lets gocvm map this call's VThread to the real OS thread that
+      // served it (wasigo::gocvm::OSThreadFor / VThread::os_thread) --
+      // trivial here (exactly one worker thread ever exists), but the
+      // plumbing doesn't care how many there are.
+      c.worker_thread = std::this_thread::get_id();
       char reply_topic[W2G_SAPI_TOPIC_MAX] = {};
       std::vector<uint8_t> buf(1 << 20);
       uint32_t n = static_cast<uint32_t>(buf.size());
