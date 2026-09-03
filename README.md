@@ -45,13 +45,29 @@ and every topic above goes back to answering a canned "not supported".
 
 `src/gocvm_bridge.cc` wires those same real backends straight into real
 Go++ *source* (not just hand-written C++ callers like `examples/bridge`):
-wasigoc's `wasigo::gocvm::Call(topic, payload)` (its own `src/runtime.hpp`
--- the one compiler-known dispatch gate, not per-package FFI) reaches
-here when a program is built with `goclang++.bat --shim-sandbox`
-(`-DWASIGO_GOCVM_BRIDGE=1`), so `net`/`crypto/tls`/`os/exec`/`os/user`/
-`syscall` stdlib source (real `net.Dial`+`Conn.Read`/`Write`, real
-`tls.Dial` HTTPS, `exec.Cmd.Start`/`Wait` with streamed output, ...)
-gets this repo's real backends, not a stub.
+wasigoc compiles `gocvm.Call(topic, payload)` to `co_await
+wasigo::gocvm::CallAsync(...)` (its own `src/runtime.hpp` -- the one
+compiler-known dispatch gate, not per-package FFI), which reaches here
+whenever a program is built with `goclang++.bat` (shim_sandbox + ABAC
+link **by default** now -- `--no-shim-sandbox`/`--no-abac` opt out), so
+`net`/`crypto/tls`/`os/exec`/`os/user`/`syscall` stdlib source (real
+`net.Dial`+`Conn.Read`/`Write`, real `tls.Dial` HTTPS, `exec.Cmd.Start`/
+`Wait` with streamed output, ...) gets this repo's real backends, not a
+stub.
+
+The bridge is **asynchronous**, not a plain synchronous callback:
+`AsyncSapiBridge` (`Submit`/`PollOne`/`WaitOne`) runs the real Win32/
+Winsock call on exactly **one** dedicated worker thread rather than on
+wasigoc's own cooperative-scheduler thread. wasigo's scheduler is
+single-threaded with no OS threads behind it, so a synchronous bridge
+call would block *every* goroutine, not just its own caller, for as
+long as the real syscall took (a socket `recv()` with no data yet, a
+subprocess that hasn't exited); the one-worker-thread design still
+serializes every call into this repo's own internals (the handle table
+in particular) exactly the way the old synchronous, single-cooperative-
+thread model already did, just off wasigoc's own thread. See
+[goxxlang/wasigoc](https://github.com/goxxlang/wasigoc)'s
+`docs/design-log.md` GocVM diary for the full history.
 
 google/sandboxed-api (sandbox2) is Linux-only (namespaces, seccomp, ptrace).
 That is a killer here (Windows + wasip1). shim_sandbox keeps the **shape**
