@@ -343,6 +343,79 @@ bool LaunchProcess(const std::string& argv_joined, bool with_stdin, PROCESS_INFO
   return true;
 }
 
+// Independent from LaunchProcess above (which Exec still uses for its
+// combined-pipe, stdin-to-NUL one-shot shape): os/exec's Start needs
+// stdout and stderr on two SEPARATE pipes (real Go's own Cmd.Output only
+// ever captures stdout; CombinedOutput's non-deterministic interleaving
+// of two independently-read pipes matches real Go's actual behavior,
+// which also uses two separate os.Pipe()s under the hood), plus the
+// already-existing real stdin pipe.
+bool LaunchProcessSplit(const std::string& argv_joined, PROCESS_INFORMATION* out_pi,
+                        HANDLE* out_stdout_read, HANDLE* out_stderr_read, HANDLE* out_stdin_write,
+                        std::string* err_out) {
+  auto fields = SplitArgv(argv_joined);
+  if (fields.empty() || fields[0].empty()) {
+    *err_out = "error: empty argv";
+    return false;
+  }
+  std::ostringstream cmd;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i) cmd << ' ';
+    cmd << QuoteArg(fields[i]);
+  }
+  std::wstring wcmd = Utf8ToWide(cmd.str());
+
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE stdout_read = nullptr, stdout_write = nullptr;
+  HANDLE stderr_read = nullptr, stderr_write = nullptr;
+  HANDLE stdin_read = nullptr, stdin_write = nullptr;
+  if (!CreatePipe(&stdout_read, &stdout_write, &sa, 0) ||
+      !CreatePipe(&stderr_read, &stderr_write, &sa, 0) ||
+      !CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
+    *err_out = "error: CreatePipe: " + WinErr(static_cast<int>(GetLastError()));
+    if (stdout_read) CloseHandle(stdout_read);
+    if (stdout_write) CloseHandle(stdout_write);
+    if (stderr_read) CloseHandle(stderr_read);
+    if (stderr_write) CloseHandle(stderr_write);
+    if (stdin_read) CloseHandle(stdin_read);
+    if (stdin_write) CloseHandle(stdin_write);
+    return false;
+  }
+  SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = stdout_write;
+  si.hStdError = stderr_write;
+  si.hStdInput = stdin_read;
+  PROCESS_INFORMATION pi{};
+
+  BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si,
+                           &pi);
+  CloseHandle(stdout_write);
+  CloseHandle(stderr_write);
+  CloseHandle(stdin_read);
+  if (!ok) {
+    *err_out = "error: CreateProcess " + fields[0] + ": " +
+              WinErr(static_cast<int>(GetLastError()));
+    CloseHandle(stdout_read);
+    CloseHandle(stderr_read);
+    CloseHandle(stdin_write);
+    return false;
+  }
+  *out_pi = pi;
+  *out_stdout_read = stdout_read;
+  *out_stderr_read = stderr_read;
+  *out_stdin_write = stdin_write;
+  return true;
+}
+
 }  // namespace
 
 Reply Exec(const std::string& argv_joined) {
@@ -373,14 +446,13 @@ Reply Exec(const std::string& argv_joined) {
 
 Reply ExecStart(const std::string& argv_joined) {
   PROCESS_INFORMATION pi{};
-  HANDLE read_end = nullptr;
-  HANDLE stdin_write = nullptr;
+  HANDLE stdout_read = nullptr, stderr_read = nullptr, stdin_write = nullptr;
   std::string err;
-  if (!LaunchProcess(argv_joined, true, &pi, &read_end, &stdin_write, &err)) {
+  if (!LaunchProcessSplit(argv_joined, &pi, &stdout_read, &stderr_read, &stdin_write, &err)) {
     return {W2G_RESULT_OK, err};
   }
   CloseHandle(pi.hThread);
-  Handle h = AllocProcess(pi.hProcess, read_end, stdin_write);
+  Handle h = AllocProcess(pi.hProcess, stdout_read, stderr_read, stdin_write);
   return {W2G_RESULT_OK, "ok handle=" + std::to_string(h)};
 }
 
@@ -396,7 +468,8 @@ Reply ExecWait(const std::string& handle) {
   return {W2G_RESULT_OK, "exit=" + std::to_string(exit_code)};
 }
 
-Reply ExecStdoutRead(const std::string& handle_and_maxlen) {
+namespace {
+Reply ExecStreamRead(const std::string& handle_and_maxlen, HANDLE ProcEntry::*stream) {
   std::string hs, ms;
   SplitOne(handle_and_maxlen, '\x1f', &hs, &ms);
   Handle h = 0;
@@ -410,12 +483,21 @@ Reply ExecStdoutRead(const std::string& handle_and_maxlen) {
   // ReadFile on a pipe returns FALSE (ERROR_BROKEN_PIPE) once the write
   // end (the child's redirected stdout/stderr) is fully closed -- same
   // EOF convention as IoRead's recv()==0: an empty OK payload.
-  if (!ReadFile(e->stdout_read, buf.data(), static_cast<DWORD>(maxlen), &n, nullptr)) {
+  if (!ReadFile(e->*stream, buf.data(), static_cast<DWORD>(maxlen), &n, nullptr)) {
     DWORD err = GetLastError();
     if (err == ERROR_BROKEN_PIPE) return {W2G_RESULT_OK, ""};
     return {W2G_RESULT_OK, "error: read: " + WinErr(static_cast<int>(err))};
   }
   return {W2G_RESULT_OK, std::string(buf.data(), n)};
+}
+}  // namespace
+
+Reply ExecStdoutRead(const std::string& handle_and_maxlen) {
+  return ExecStreamRead(handle_and_maxlen, &ProcEntry::stdout_read);
+}
+
+Reply ExecStderrRead(const std::string& handle_and_maxlen) {
+  return ExecStreamRead(handle_and_maxlen, &ProcEntry::stderr_read);
 }
 
 Reply ExecStdinWrite(const std::string& handle_and_data) {
@@ -444,6 +526,88 @@ Reply ExecStdinClose(const std::string& handle) {
   if (!LookupProcess(h)) return {W2G_RESULT_INVALID_ARGUMENT, "error: unknown handle " + handle};
   CloseProcessStdin(h);
   return {W2G_RESULT_OK, "ok"};
+}
+
+namespace {
+
+// Splits on sep, dropping empty fields (";;" or a leading/trailing ";"
+// contribute nothing) -- both %PATHEXT% and %PATH% use this convention.
+std::vector<std::wstring> SplitEnvList(const std::wstring& s, wchar_t sep) {
+  std::vector<std::wstring> out;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t p = s.find(sep, start);
+    std::wstring tok = s.substr(start, p == std::wstring::npos ? std::wstring::npos : p - start);
+    if (!tok.empty()) out.push_back(tok);
+    if (p == std::wstring::npos) break;
+    start = p + 1;
+  }
+  return out;
+}
+
+std::wstring GetEnvW(const wchar_t* name, const wchar_t* fallback) {
+  constexpr DWORD kCap = 32768;
+  wchar_t buf[kCap];
+  DWORD n = GetEnvironmentVariableW(name, buf, kCap);
+  return (n > 0 && n < kCap) ? std::wstring(buf, n) : std::wstring(fallback);
+}
+
+bool FileExistsNotDir(const std::wstring& path) {
+  DWORD attrs = GetFileAttributesW(path.c_str());
+  return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// A trailing "." after the last path separator counts as an extension
+// (matches real Go's own lp_windows.go hasExt, which just checks for
+// a '.' in the final path element -- it doesn't validate the extension
+// against PATHEXT here, only decides whether to append one at all).
+bool HasExtension(const std::string& name) {
+  size_t slash = name.find_last_of("/\\");
+  size_t dot = name.find_last_of('.');
+  return dot != std::string::npos && (slash == std::string::npos || dot > slash);
+}
+
+}  // namespace
+
+// Real PATH/PATHEXT search, Windows semantics: current directory is NOT
+// implicitly searched (only explicit "." or "..\" entries in PATH would
+// hit it) -- matches modern Go's own security-hardened LookPath, not
+// classic cmd.exe. Bounded relative to real Go's actual algorithm: no
+// ErrDot relative-path diagnostic, no UNC-path special-casing. A name
+// with an extension already (a '.' in its final path element) is
+// checked as-is; one without tries each %PATHEXT% entry (default
+// ".COM;.EXE;.BAT;.CMD" if unset, same default real Go uses) in order.
+Reply ExecLookPath(const std::string& file) {
+  if (file.empty()) return {W2G_RESULT_OK, "error: " + file};
+  std::wstring wfile = Utf8ToWide(file);
+  bool has_ext = HasExtension(file);
+  bool has_sep = file.find_first_of("/\\") != std::string::npos;
+  std::vector<std::wstring> exts;
+  if (!has_ext) exts = SplitEnvList(GetEnvW(L"PATHEXT", L".COM;.EXE;.BAT;.CMD"), L';');
+
+  auto tryBase = [&](const std::wstring& base) -> std::wstring {
+    if (has_ext) return FileExistsNotDir(base) ? base : L"";
+    for (const auto& ext : exts) {
+      std::wstring cand = base + ext;
+      if (FileExistsNotDir(cand)) return cand;
+    }
+    return L"";
+  };
+
+  if (has_sep) {
+    std::wstring found = tryBase(wfile);
+    if (!found.empty()) return {W2G_RESULT_OK, "ok " + WideToUtf8(found.c_str())};
+    return {W2G_RESULT_OK, "error: " + file};
+  }
+
+  for (const auto& dir : SplitEnvList(GetEnvW(L"PATH", L""), L';')) {
+    std::wstring base = dir;
+    if (base.back() != L'\\' && base.back() != L'/') base += L'\\';
+    base += wfile;
+    std::wstring found = tryBase(base);
+    if (!found.empty()) return {W2G_RESULT_OK, "ok " + WideToUtf8(found.c_str())};
+  }
+  return {W2G_RESULT_OK, "error: " + file};
 }
 
 namespace {

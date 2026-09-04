@@ -49,6 +49,7 @@ struct SockEntry {
 struct ProcEntry {
   HANDLE process = nullptr;
   HANDLE stdout_read = nullptr;
+  HANDLE stderr_read = nullptr;
   HANDLE stdin_write = nullptr;
 };
 
@@ -67,7 +68,7 @@ struct TlsEntry {
 };
 
 Handle AllocSocket(SOCKET s, bool udp);
-Handle AllocProcess(HANDLE process, HANDLE stdout_read, HANDLE stdin_write);
+Handle AllocProcess(HANDLE process, HANDLE stdout_read, HANDLE stderr_read, HANDLE stdin_write);
 Handle AllocTls(SOCKET s, CredHandle cred, CtxtHandle ctx, SecPkgContext_StreamSizes sizes);
 
 SockEntry* LookupSocket(Handle h);

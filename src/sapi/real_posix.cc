@@ -28,8 +28,10 @@ Reply Exec(const std::string&) { return NotPortedYet("os.exec"); }
 Reply ExecStart(const std::string&) { return NotPortedYet("os.exec.start"); }
 Reply ExecWait(const std::string&) { return NotPortedYet("os.exec.wait"); }
 Reply ExecStdoutRead(const std::string&) { return NotPortedYet("os.exec.stdout.read"); }
+Reply ExecStderrRead(const std::string&) { return NotPortedYet("os.exec.stderr.read"); }
 Reply ExecStdinWrite(const std::string&) { return NotPortedYet("os.exec.stdin.write"); }
 Reply ExecStdinClose(const std::string&) { return NotPortedYet("os.exec.stdin.close"); }
+Reply ExecLookPath(const std::string&) { return NotPortedYet("os.exec.lookpath"); }
 Reply User(const std::string&) { return NotPortedYet("os.user"); }
 Reply Syscall(const std::string&) { return NotPortedYet("syscall"); }
 Reply TlsDial(const std::string&) { return NotPortedYet("tls.dial"); }

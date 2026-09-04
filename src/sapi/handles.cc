@@ -43,10 +43,10 @@ Handle AllocSocket(SOCKET s, bool udp) {
   return h;
 }
 
-Handle AllocProcess(HANDLE process, HANDLE stdout_read, HANDLE stdin_write) {
+Handle AllocProcess(HANDLE process, HANDLE stdout_read, HANDLE stderr_read, HANDLE stdin_write) {
   std::lock_guard<std::mutex> lk(mu());
   Handle h = ++next_handle();
-  processes()[h] = ProcEntry{process, stdout_read, stdin_write};
+  processes()[h] = ProcEntry{process, stdout_read, stderr_read, stdin_write};
   return h;
 }
 
@@ -87,6 +87,7 @@ void Release(Handle h) {
   }
   if (auto it = processes().find(h); it != processes().end()) {
     if (it->second.stdout_read) CloseHandle(it->second.stdout_read);
+    if (it->second.stderr_read) CloseHandle(it->second.stderr_read);
     if (it->second.stdin_write) CloseHandle(it->second.stdin_write);
     if (it->second.process) CloseHandle(it->second.process);
     processes().erase(it);

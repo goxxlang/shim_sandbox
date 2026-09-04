@@ -80,22 +80,29 @@ Reply IoWriteTo(const std::string& handle_and_addr_and_data);
 Reply IoClose(const std::string& handle);
 
 // Fields separated by 0x1F: argv[0], argv[1], ... Real CreateProcess,
-// waits for exit, captures combined stdout+stderr (bounded). Reply
-// payload is "exit=<n>\n<output>". Unlike Start below, this is the
-// original one-shot synchronous exec (os/exec's Run/Output/
-// CombinedOutput).
+// waits for exit, captures combined stdout+stderr (bounded, stdin NUL).
+// Reply payload is "exit=<n>\n<output>". Unused by os/exec's Go source
+// as of the stdout/stderr split below (kept working, still a valid
+// combined-pipe primitive for direct gocvm.Call use) -- Run/Output/
+// CombinedOutput all route through Start+Wait instead, which gives
+// stdout and stderr independent pipes.
 Reply Exec(const std::string& argv_joined);
 // Same argv shape as Exec, but does not wait: spawns the process with
-// its combined stdout+stderr redirected to a pipe this call keeps open,
-// and replies "ok handle=<id>" immediately (os/exec's Start).
+// stdout, stderr, and stdin each on their OWN real pipe (unlike Exec's
+// combined stdout+stderr and NUL stdin), and replies "ok handle=<id>"
+// immediately (os/exec's Start).
 Reply ExecStart(const std::string& argv_joined);
 // "<handle>". Blocks for the process to exit. Reply "exit=<n>".
 Reply ExecWait(const std::string& handle);
-// "<handle>\x1f<maxlen>". Real ReadFile on the process's combined
-// output pipe (blocks). Reply payload is the raw bytes read; an empty
-// successful reply means the pipe is at EOF (process exited and all
-// buffered output drained), same convention as IoRead.
+// "<handle>\x1f<maxlen>". Real ReadFile on the process's stdout pipe
+// (blocks) -- an `os.exec.start` handle only, which (unlike the one-shot
+// `Exec` above) gives stdout and stderr separate pipes. Reply payload is
+// the raw bytes read; an empty successful reply means the pipe is at EOF
+// (process exited and all buffered output drained), same convention as
+// IoRead.
 Reply ExecStdoutRead(const std::string& handle_and_maxlen);
+// Same shape as ExecStdoutRead, but the process's separate stderr pipe.
+Reply ExecStderrRead(const std::string& handle_and_maxlen);
 // "<handle>\x1f<data>". Real WriteFile onto the process's stdin pipe
 // (an `os.exec.start` handle only -- the one-shot `Exec` above still
 // wires stdin to NUL, matching os/exec's own doc that stdin needs
@@ -106,6 +113,11 @@ Reply ExecStdinWrite(const std::string& handle_and_data);
 // distinct from ExecWait/Release, which is why a plain IoClose isn't
 // reused here.
 Reply ExecStdinClose(const std::string& handle);
+// "<file>". Real PATH/%PATHEXT% search (GetEnvironmentVariableW +
+// GetFileAttributesW per candidate, current directory NOT implicitly
+// searched -- matches modern Go's own hardened LookPath, not classic
+// cmd.exe). Replies "ok <resolved path>" or "error: <file>".
+Reply ExecLookPath(const std::string& file);
 
 // op_and_arg: "" (current process's user) | "lookup <name>" |
 // "lookupid <sid-string>". Real GetUserNameW / NetUserGetInfo /
