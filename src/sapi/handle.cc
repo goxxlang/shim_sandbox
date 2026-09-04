@@ -27,6 +27,8 @@ const char* ReplyTopic(const char* topic) {
   if (std::strcmp(topic, "os.exec.start") == 0) return "os.exec.start.reply";
   if (std::strcmp(topic, "os.exec.wait") == 0) return "os.exec.wait.reply";
   if (std::strcmp(topic, "os.exec.stdout.read") == 0) return "os.exec.stdout.read.reply";
+  if (std::strcmp(topic, "os.exec.stdin.write") == 0) return "os.exec.stdin.write.reply";
+  if (std::strcmp(topic, "os.exec.stdin.close") == 0) return "os.exec.stdin.close.reply";
   if (std::strcmp(topic, "os.user") == 0) return "os.user.reply";
   if (std::strcmp(topic, "syscall") == 0) return "syscall.reply";
   if (std::strcmp(topic, "tls.dial") == 0) return "tls.dial.reply";
@@ -83,6 +85,8 @@ w2g::real::Reply Dispatch(const char* topic, const std::string& payload) {
   if (std::strcmp(topic, "os.exec.start") == 0) return ExecStart(payload);
   if (std::strcmp(topic, "os.exec.wait") == 0) return ExecWait(payload);
   if (std::strcmp(topic, "os.exec.stdout.read") == 0) return ExecStdoutRead(payload);
+  if (std::strcmp(topic, "os.exec.stdin.write") == 0) return ExecStdinWrite(payload);
+  if (std::strcmp(topic, "os.exec.stdin.close") == 0) return ExecStdinClose(payload);
   if (std::strcmp(topic, "os.user") == 0) return User(payload);
   if (std::strcmp(topic, "syscall") == 0) return Syscall(payload);
   if (std::strcmp(topic, "tls.dial") == 0) return TlsDial(payload);

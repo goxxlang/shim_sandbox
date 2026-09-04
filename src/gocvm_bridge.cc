@@ -18,13 +18,16 @@
 // socket recv() with no data yet, a subprocess that hasn't exited)
 // stalled every other ready goroutine too.
 //
-// Exactly ONE worker thread runs W2gSapiHandle, never more: it's the
-// same serialization shim_sandbox's own internals (the handle table in
-// particular) already relied on when everything ran on the single
-// cooperative thread -- moving that serialized execution onto its own
-// OS thread removes the "blocks every other goroutine" problem without
-// having to audit real_win.cc/handle.cc for concurrent-call safety they
-// were never designed for.
+// A small fixed-size worker pool runs W2gSapiHandle, not just one
+// thread: a single worker deadlocks the instant two blocking calls on
+// two different handles need to be in flight at once -- e.g. os/exec's
+// stdin-write pump and stdout-read pump on the same running process
+// (found by actually hitting it: a real ExecStdoutRead ReadFile blocked
+// waiting for output the child would only produce after consuming stdin
+// that ExecStdinWrite's WriteFile, queued behind it, never got to run).
+// handles.h's Alloc*/Lookup*/Release now take a real mutex around the
+// map operation itself to make this safe -- see that file's doc comment
+// for exactly what is and isn't protected.
 #include "runtime.hpp"
 #include "w2g/sapi.h"
 
@@ -38,6 +41,8 @@
 
 namespace {
 
+constexpr int kWorkerCount = 4;
+
 struct Job {
   uint64_t id = 0;
   std::string topic;
@@ -46,14 +51,20 @@ struct Job {
 
 class AsyncSapiBridge : public wasigo::gocvm::AsyncHostBridge {
  public:
-  AsyncSapiBridge() : worker_(&AsyncSapiBridge::WorkerLoop, this) {}
+  AsyncSapiBridge() {
+    for (int i = 0; i < kWorkerCount; ++i) {
+      workers_.emplace_back(&AsyncSapiBridge::WorkerLoop, this);
+    }
+  }
   ~AsyncSapiBridge() override {
     {
       std::lock_guard<std::mutex> lk(mu_);
       shutdown_ = true;
     }
     cv_jobs_.notify_all();
-    if (worker_.joinable()) worker_.join();
+    for (auto& w : workers_) {
+      if (w.joinable()) w.join();
+    }
   }
   AsyncSapiBridge(const AsyncSapiBridge&) = delete;
   AsyncSapiBridge& operator=(const AsyncSapiBridge&) = delete;
@@ -106,8 +117,8 @@ class AsyncSapiBridge : public wasigo::gocvm::AsyncHostBridge {
       c.id = job.id;
       // Lets gocvm map this call's VThread to the real OS thread that
       // served it (wasigo::gocvm::OSThreadFor / VThread::os_thread) --
-      // trivial here (exactly one worker thread ever exists), but the
-      // plumbing doesn't care how many there are.
+      // now genuinely one of kWorkerCount threads, not always the same
+      // one; the plumbing already didn't care how many there are.
       c.worker_thread = std::this_thread::get_id();
       char reply_topic[W2G_SAPI_TOPIC_MAX] = {};
       std::vector<uint8_t> buf(1 << 20);
@@ -147,7 +158,7 @@ class AsyncSapiBridge : public wasigo::gocvm::AsyncHostBridge {
   std::deque<Completion> results_;
   uint64_t next_id_ = 0;
   bool shutdown_ = false;
-  std::thread worker_;
+  std::vector<std::thread> workers_;
 };
 
 }  // namespace

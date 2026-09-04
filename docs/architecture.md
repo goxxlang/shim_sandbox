@@ -84,6 +84,8 @@ Handle-based follow-ups (`src/sapi/handles.h`'s table; no `gxx.*` layer):
 | `os.exec.start` | `os.exec.start.reply` | real `CreateProcess`, does **not** wait -- returns a process handle |
 | `os.exec.wait` | `os.exec.wait.reply` | real `WaitForSingleObject` + exit code on an `os.exec.start` handle |
 | `os.exec.stdout.read` | `....reply` | real `ReadFile` on the process's combined output pipe |
+| `os.exec.stdin.write` | `....reply` | real `WriteFile` onto the process's stdin pipe (`os.exec.start` handles only) |
+| `os.exec.stdin.close` | `....reply` | closes the process's stdin pipe, signaling EOF to the child |
 | `tls.io.read` / `write` / `close` | `....reply` | real `DecryptMessage`/`EncryptMessage` around a `tls.dial` handle's socket |
 
 The communication (Pipe/Bus/ExtraLayer/SAPI) was always real; what used to

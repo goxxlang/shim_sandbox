@@ -271,12 +271,16 @@ std::vector<std::string> SplitArgv(const std::string& argv_joined) {
   return fields;
 }
 
-// Launches argv with its stdin wired to NUL (no interactive input --
-// see os.exec's docs) and combined stdout+stderr redirected to a pipe
-// this returns the read end of (write end closed in the parent already).
-// Caller owns *out_process/*out_read on success.
-bool LaunchProcess(const std::string& argv_joined, PROCESS_INFORMATION* out_pi,
-                   HANDLE* out_read, std::string* err_out) {
+// Launches argv with combined stdout+stderr redirected to a pipe this
+// returns the read end of (write end closed in the parent already).
+// When with_stdin is false, the child's stdin is wired to NUL (no
+// interactive input -- the original one-shot Exec's behavior, which has
+// no way to stream input during its single blocking call). When true,
+// *out_stdin_write receives the parent's write end of a real stdin pipe
+// (os/exec's Start, which can stream input via ExecStdinWrite below).
+// Caller owns *out_process/*out_read/*out_stdin_write on success.
+bool LaunchProcess(const std::string& argv_joined, bool with_stdin, PROCESS_INFORMATION* out_pi,
+                   HANDLE* out_read, HANDLE* out_stdin_write, std::string* err_out) {
   auto fields = SplitArgv(argv_joined);
   if (fields.empty() || fields[0].empty()) {
     *err_out = "error: empty argv";
@@ -299,29 +303,43 @@ bool LaunchProcess(const std::string& argv_joined, PROCESS_INFORMATION* out_pi,
   }
   SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
 
-  HANDLE nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                              OPEN_EXISTING, 0, nullptr);
+  HANDLE stdin_read = nullptr, stdin_write = nullptr, nul_in = nullptr;
+  if (with_stdin) {
+    if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0)) {
+      *err_out = "error: CreatePipe: " + WinErr(static_cast<int>(GetLastError()));
+      CloseHandle(read_end);
+      CloseHandle(write_end);
+      return false;
+    }
+    SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0);
+  } else {
+    nul_in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                         OPEN_EXISTING, 0, nullptr);
+  }
 
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
   si.hStdOutput = write_end;
   si.hStdError = write_end;
-  si.hStdInput = nul_in;
+  si.hStdInput = with_stdin ? stdin_read : nul_in;
   PROCESS_INFORMATION pi{};
 
   BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si,
                            &pi);
   CloseHandle(write_end);
   if (nul_in != INVALID_HANDLE_VALUE && nul_in != nullptr) CloseHandle(nul_in);
+  if (stdin_read) CloseHandle(stdin_read);
   if (!ok) {
     *err_out = "error: CreateProcess " + fields[0] + ": " +
               WinErr(static_cast<int>(GetLastError()));
     CloseHandle(read_end);
+    if (stdin_write) CloseHandle(stdin_write);
     return false;
   }
   *out_pi = pi;
   *out_read = read_end;
+  if (out_stdin_write) *out_stdin_write = stdin_write;
   return true;
 }
 
@@ -331,7 +349,7 @@ Reply Exec(const std::string& argv_joined) {
   PROCESS_INFORMATION pi{};
   HANDLE read_end = nullptr;
   std::string err;
-  if (!LaunchProcess(argv_joined, &pi, &read_end, &err)) return {W2G_RESULT_OK, err};
+  if (!LaunchProcess(argv_joined, false, &pi, &read_end, nullptr, &err)) return {W2G_RESULT_OK, err};
 
   std::string out;
   char buf[4096];
@@ -356,10 +374,13 @@ Reply Exec(const std::string& argv_joined) {
 Reply ExecStart(const std::string& argv_joined) {
   PROCESS_INFORMATION pi{};
   HANDLE read_end = nullptr;
+  HANDLE stdin_write = nullptr;
   std::string err;
-  if (!LaunchProcess(argv_joined, &pi, &read_end, &err)) return {W2G_RESULT_OK, err};
+  if (!LaunchProcess(argv_joined, true, &pi, &read_end, &stdin_write, &err)) {
+    return {W2G_RESULT_OK, err};
+  }
   CloseHandle(pi.hThread);
-  Handle h = AllocProcess(pi.hProcess, read_end, nullptr);
+  Handle h = AllocProcess(pi.hProcess, read_end, stdin_write);
   return {W2G_RESULT_OK, "ok handle=" + std::to_string(h)};
 }
 
@@ -395,6 +416,34 @@ Reply ExecStdoutRead(const std::string& handle_and_maxlen) {
     return {W2G_RESULT_OK, "error: read: " + WinErr(static_cast<int>(err))};
   }
   return {W2G_RESULT_OK, std::string(buf.data(), n)};
+}
+
+Reply ExecStdinWrite(const std::string& handle_and_data) {
+  std::string hs, data;
+  SplitOne(handle_and_data, '\x1f', &hs, &data);
+  Handle h = 0;
+  if (!ParseHandle(hs, &h)) return {W2G_RESULT_INVALID_ARGUMENT, "error: bad handle"};
+  ProcEntry* e = LookupProcess(h);
+  if (!e) return {W2G_RESULT_INVALID_ARGUMENT, "error: unknown handle " + hs};
+  if (!e->stdin_write) return {W2G_RESULT_OK, "error: stdin not piped (process not started with a stdin pipe, or already closed)"};
+  size_t sent = 0;
+  while (sent < data.size()) {
+    DWORD n = 0;
+    if (!WriteFile(e->stdin_write, data.data() + sent, static_cast<DWORD>(data.size() - sent), &n,
+                   nullptr)) {
+      return {W2G_RESULT_OK, "error: write: " + WinErr(static_cast<int>(GetLastError()))};
+    }
+    sent += n;
+  }
+  return {W2G_RESULT_OK, std::to_string(sent)};
+}
+
+Reply ExecStdinClose(const std::string& handle) {
+  Handle h = 0;
+  if (!ParseHandle(handle, &h)) return {W2G_RESULT_INVALID_ARGUMENT, "error: bad handle"};
+  if (!LookupProcess(h)) return {W2G_RESULT_INVALID_ARGUMENT, "error: unknown handle " + handle};
+  CloseProcessStdin(h);
+  return {W2G_RESULT_OK, "ok"};
 }
 
 namespace {

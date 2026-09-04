@@ -96,6 +96,16 @@ Reply ExecWait(const std::string& handle);
 // successful reply means the pipe is at EOF (process exited and all
 // buffered output drained), same convention as IoRead.
 Reply ExecStdoutRead(const std::string& handle_and_maxlen);
+// "<handle>\x1f<data>". Real WriteFile onto the process's stdin pipe
+// (an `os.exec.start` handle only -- the one-shot `Exec` above still
+// wires stdin to NUL, matching os/exec's own doc that stdin needs
+// Start). Reply payload is the decimal count of bytes written.
+Reply ExecStdinWrite(const std::string& handle_and_data);
+// "<handle>". Closes the process's stdin pipe (signals EOF to the
+// child) without touching the handle's stdout pipe or process handle --
+// distinct from ExecWait/Release, which is why a plain IoClose isn't
+// reused here.
+Reply ExecStdinClose(const std::string& handle);
 
 // op_and_arg: "" (current process's user) | "lookup <name>" |
 // "lookupid <sid-string>". Real GetUserNameW / NetUserGetInfo /
